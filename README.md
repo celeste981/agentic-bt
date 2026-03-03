@@ -59,7 +59,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```bash
 # 1. 配置环境变量
 cp .env.example .env
-# 编辑 .env：设置 API_KEY、MODEL、TUSHARE_TOKEN
+# 编辑 .env：设置 API_KEY、MODEL、BASE_URL（可选）、TUSHARE_TOKEN
 
 # 2. 启动
 python -m agent.adapters.cli
@@ -132,17 +132,18 @@ from agent.tools import read, write, edit, compute, market, bash
 from agent.adapters.market.csv import CsvAdapter
 
 workspace, cwd = Path("./workspace"), Path.cwd()
-
 kernel = Kernel(model="gpt-4o-mini", api_key="sk-...")
-kernel.boot(workspace)
 
 # 注册工具
 read.register(kernel, workspace, cwd)
 write.register(kernel, workspace, cwd)
 edit.register(kernel, workspace, cwd)
 compute.register(kernel)
-market.register(kernel, CsvAdapter({"300750": df}))
+market.register(kernel, CsvAdapter({"300750": your_dataframe}))  # OHLCV DataFrame
 bash.register(kernel, cwd=cwd)
+
+# 自举（检测 soul.md，无则进入种子对话）
+kernel.boot(workspace)
 
 # 声明式管道 + 权限
 kernel.wire("write:soul.md", lambda e, d: kernel._assemble_system_prompt())
