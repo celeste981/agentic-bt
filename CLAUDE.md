@@ -11,7 +11,7 @@ Agent 说意图，Framework 说真相。LLM Agent 像人类交易员一样思考
 ## 目录结构
 
 ```
-docs/          - 设计文档 (12 篇，agent-design.md 是 Agent 唯一活文档)
+docs/          - 设计文档 (13 篇，agent-design.md 是 Agent 唯一活文档)
 src/
   core/        - 公共基础包 (4 文件: sandbox/indicators/tracer)
   agenticbt/   - 回测框架 (13 文件，import core/)
@@ -25,13 +25,13 @@ pyproject.toml - Python 包配置（venv: .venv/）
 ```
 
 <directory>
-docs/ - 完整设计文档集 (12 文件: agent-design, architecture, engine, tools, compute, memory, context, eval, agent-protocol, runner, tracer, roadmap)
+docs/ - 完整设计文档集 (13 文件: agent-design, architecture, engine, tools, compute, memory, context, eval, agent-protocol, runner, tracer, roadmap, skills)
 src/core/ - 公共基础包 (4 文件: __init__, sandbox, indicators, tracer)
 src/agenticbt/ - 回测框架 (13 文件: __init__, models, engine, indicators, memory, tools, sandbox, context, agent, runner, eval, data, tracer)
-src/agent/ - 持久投资助手 (18 文件: kernel + 6 tools + _path + _truncate + 4 adapters + 2 bootstrap + 4 __init__)
+src/agent/ - 持久投资助手 (19 文件: kernel + skills + 6 tools + _path + _truncate + 4 adapters + 2 bootstrap + 4 __init__)
 scripts/ - 分析脚本 (1 文件: analyze_trace)
 examples/ - 策略模块 (2 文件: __init__, strategies)
-tests/ - BDD 测试 + E2E (35 文件: 16 features + 17 step definitions + conftest + __init__)
+tests/ - BDD 测试 + E2E (37 文件: 17 features + 18 step definitions + conftest + __init__)
 </directory>
 
 ## 核心模块

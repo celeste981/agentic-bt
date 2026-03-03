@@ -36,5 +36,7 @@
 `test_tushare_adapter.py`: tushare_adapter.feature step definitions（fixture: tsctx，mock tushare API）
 `features/agent_tools.feature`: Agent 工具系统行为规格（20 scenarios：read 分页截断行号/edit 模糊匹配唯一性diff/write 字节数/bash 超时截断/路径安全）
 `test_agent_tools.py`: agent_tools.feature step definitions（fixture: atx，MockKernel + 双信任区域）
+`features/skills.feature`: Skill Engine 行为规格（6 scenarios：发现/注入/显式展开/disable-model-invocation/模型自主 skill_invoke）
+`test_skills.py`: skills.feature step definitions（fixture: sctx，Mock LLM + skill 临时目录）
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

@@ -240,7 +240,7 @@ def given_workspace_memory(kctx, content):
 
 @when("Kernel boot", target_fixture="kctx")
 def when_kernel_boot(kctx):
-    kctx["kernel"].boot(kctx["workspace"])
+    kctx["kernel"].boot(kctx["workspace"], skill_roots=[])
     return kctx
 
 

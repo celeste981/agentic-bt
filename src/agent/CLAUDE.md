@@ -7,7 +7,8 @@
 
 ## 成员清单
 `__init__.py`: 包入口
-`kernel.py`: Kernel 核心协调器（ReAct loop + wire/emit 声明式管道 + DataStore + Permission 权限 + boot 自举 + _assemble_system_prompt soul 刷新）；Session 会话容器（持久化 save/load）；DataStore 数据注册表；Permission 枚举；MemoryCompressor Protocol；MEMORY_MAX_CHARS = 100_000；WORKSPACE_GUIDE 元认知框架
+`kernel.py`: Kernel 核心协调器（ReAct loop + wire/emit 声明式管道 + DataStore + Permission 权限 + boot 自举 + Skill Engine 集成 + /skill 显式展开 + skill_invoke 工具 + _assemble_system_prompt 注入 skills 摘要）；Session 会话容器（持久化 save/load）；DataStore 数据注册表；Permission 枚举；MemoryCompressor Protocol；MEMORY_MAX_CHARS = 100_000；WORKSPACE_GUIDE 元认知框架
+`skills.py`: Agent Skills 引擎（目录发现 + SKILL.md/frontmatter 解析 + 校验诊断 + 重名冲突处理 + `<available_skills>` XML 注入文本生成 + `/skill:name` 命令展开 + skill_invoke 载荷构建）
 
 ### tools/
 `__init__.py`: 工具包入口

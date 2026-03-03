@@ -189,7 +189,7 @@ def when_save_load(ktctx):
 @when("Kernel 启动", target_fixture="ktctx")
 def when_boot(ktctx):
     kernel = Kernel(api_key="test")
-    kernel.boot(ktctx["workspace"])
+    kernel.boot(ktctx["workspace"], skill_roots=[])
     ktctx["kernel"] = kernel
     return ktctx
 

@@ -285,7 +285,7 @@ agentic-bt/
 │
 ├── examples/strategies.py         # 8 策略注册表（Mock Agent + LLM Prompt）
 ├── scripts/                       # trace 分析脚本
-└── docs/                          # 12 篇设计文档（agent-design.md 是 Agent 唯一活文档）
+└── docs/                          # 13 篇设计文档（agent-design.md 是 Agent 唯一活文档）
 ```
 
 ---
@@ -306,7 +306,7 @@ agentic-bt/
 | agenticbt V1 | 完成 | 单资产 · 市价单 · BDD 驱动 · Mock + 真实 LLM |
 | agenticbt V2 | 完成 | 多资产 · bracket/limit/stop · 风控 4 检查 · ~190 BDD scenarios |
 
-设计文档：[docs/agent-design.md](docs/agent-design.md)（Agent 唯一活文档）· [docs/roadmap.md](docs/roadmap.md)
+设计文档：[docs/agent-design.md](docs/agent-design.md)（Agent 唯一活文档）· [docs/skills.md](docs/skills.md)（Skill Engine 集成）· [docs/roadmap.md](docs/roadmap.md)
 
 ---
 

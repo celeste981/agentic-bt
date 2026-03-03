@@ -1,13 +1,14 @@
 """
-[INPUT]: openai, json, pathlib, enum
-[OUTPUT]: Kernel — 核心协调器；Session — 会话容器；DataStore — 数据注册表；Permission — 文件权限级别；MemoryCompressor — 压缩策略接口；MEMORY_MAX_CHARS；WORKSPACE_GUIDE
-[POS]: agent 包核心，系统唯一协调中心：ReAct loop + 声明式 wire/emit + DataStore + 权限 + 自举
+[INPUT]: openai, json, pathlib, enum, agent.skills
+[OUTPUT]: Kernel — 核心协调器；Session — 会话容器；DataStore — 数据注册表；Permission — 文件权限级别；MemoryCompressor — 压缩策略接口；MEMORY_MAX_CHARS；WORKSPACE_GUIDE；skill_invoke
+[POS]: agent 包核心，系统唯一协调中心：ReAct loop + 声明式 wire/emit + DataStore + 权限 + 自举 + Skill Engine
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from datetime import datetime
 from dataclasses import dataclass
@@ -17,6 +18,14 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 import openai
+
+from agent.skills import (
+    Skill,
+    build_available_skills_prompt,
+    expand_explicit_skill_command,
+    invoke_skill,
+    load_skills,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,13 +170,23 @@ class Kernel:
         self._system_prompt: str | None = None
         self._workspace: Path | None = None
         self._confirm_handler: Callable[[str], bool] | None = None
+        self._skills: dict[str, Skill] = {}
+        self._skill_diagnostics: list[dict[str, str]] = []
 
     # ── 自举 ──────────────────────────────────────────────────────────────────
 
-    def boot(self, workspace: Path) -> None:
+    def boot(
+        self,
+        workspace: Path,
+        *,
+        cwd: Path | None = None,
+        skill_roots: list[Path] | None = None,
+    ) -> None:
         """启动：soul + workspace 使用指南 → 系统提示词"""
         self._workspace = workspace
         workspace.mkdir(parents=True, exist_ok=True)
+        self._load_skills(cwd=(cwd or Path.cwd()), skill_roots=skill_roots)
+        self._register_skill_invoke_tool()
         self._assemble_system_prompt()
 
     def _assemble_system_prompt(self) -> None:
@@ -178,7 +197,115 @@ class Kernel:
         else:
             from agent.bootstrap.seed import SEED_PROMPT
             identity = SEED_PROMPT
-        self._system_prompt = f"{identity}\n\n{WORKSPACE_GUIDE}"
+        parts = [identity, WORKSPACE_GUIDE]
+        skills_xml = build_available_skills_prompt(self._skills)
+        if skills_xml and ("read" in self._tools or "skill_invoke" in self._tools):
+            parts.append(skills_xml)
+        self._system_prompt = "\n\n".join(parts)
+
+    def _load_skills(self, cwd: Path, skill_roots: list[Path] | None) -> None:
+        roots: list[tuple[Path, str]]
+        if skill_roots is not None:
+            roots = [(Path(path).expanduser(), "path") for path in skill_roots]
+        else:
+            roots = self._default_skill_roots(cwd.resolve())
+        self._skills, self._skill_diagnostics = load_skills(roots)
+        self.emit(
+            "skills.loaded",
+            {
+                "count": len(self._skills),
+                "roots": [str(path) for path, _source in roots],
+                "diagnostics": self._skill_diagnostics,
+            },
+        )
+
+    def _default_skill_roots(self, cwd: Path) -> list[tuple[Path, str]]:
+        roots: list[tuple[Path, str]] = []
+
+        # 1) 显式路径（环境变量）
+        env_paths = os.getenv("SKILL_PATHS", "").strip()
+        if env_paths:
+            for raw in env_paths.split(os.pathsep):
+                raw = raw.strip()
+                if raw:
+                    roots.append((Path(raw).expanduser(), "path"))
+
+        # 2) 项目级路径：从 cwd 向上直到 git root
+        for base in self._project_ancestors(cwd):
+            roots.append((base / ".agents" / "skills", "project"))
+            roots.append((base / ".pi" / "skills", "project"))
+
+        # 3) 用户级路径
+        user_roots = [
+            Path("~/.agents/skills"),
+            Path("~/.pi/agent/skills"),
+            Path("~/.agent/skills"),
+            Path("~/.claude/skills"),
+            Path("~/.codex/skills"),
+            Path("~/.cursor/skills"),
+        ]
+        roots.extend((path.expanduser(), "user") for path in user_roots)
+
+        # 保序去重
+        unique: list[tuple[Path, str]] = []
+        seen: set[Path] = set()
+        for path, source in roots:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append((resolved, source))
+        return unique
+
+    def _project_ancestors(self, cwd: Path) -> list[Path]:
+        git_root = self._find_git_root(cwd)
+        if git_root is None:
+            return [cwd]
+        result: list[Path] = []
+        current = cwd
+        while True:
+            result.append(current)
+            if current == git_root:
+                break
+            current = current.parent
+        return result
+
+    @staticmethod
+    def _find_git_root(start: Path) -> Path | None:
+        current = start
+        while True:
+            if (current / ".git").exists():
+                return current
+            if current.parent == current:
+                return None
+            current = current.parent
+
+    def _register_skill_invoke_tool(self) -> None:
+        def skill_invoke_handler(args: dict) -> dict:
+            name = str(args.get("name", "")).strip()
+            if not name:
+                return {"error": "缺少参数: name"}
+            skill_args = str(args.get("args", "")).strip()
+            result = invoke_skill(name=name, args=skill_args, skills=self._skills)
+            self.emit(
+                "skill.invoke",
+                {"name": name, "args": skill_args, "error": result.get("error")},
+            )
+            return result
+
+        self.tool(
+            name="skill_invoke",
+            description="加载指定 skill 的完整正文与展开内容，供后续执行该技能工作流",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "skill 名称"},
+                    "args": {"type": "string", "description": "可选：用户参数或补充上下文"},
+                },
+                "required": ["name"],
+            },
+            handler=skill_invoke_handler,
+        )
 
     # ── 工具注册 ──────────────────────────────────────────────────────────────
 
@@ -242,8 +369,25 @@ class Kernel:
         """核心：接收用户输入 → ReAct loop → 返回回复"""
         today = datetime.now().strftime("%Y-%m-%d")
         self.emit("turn.start", {"input": user_input})
-        dated_input = f"[{today}]\n{user_input}"
+        expanded, expand_error, skill_name = expand_explicit_skill_command(
+            user_input=user_input,
+            skills=self._skills,
+        )
+        final_user_input = expanded or user_input
+        dated_input = f"[{today}]\n{final_user_input}"
         session.history.append({"role": "user", "content": dated_input})
+
+        if expand_error:
+            session.history.append({"role": "assistant", "content": expand_error})
+            self.emit(
+                "skill.expand.error",
+                {"input": user_input, "skill": skill_name, "error": expand_error},
+            )
+            self.emit("turn.done", {"input": user_input, "reply": expand_error})
+            return expand_error
+
+        if expanded:
+            self.emit("skill.expanded", {"input": user_input, "skill": skill_name})
 
         tool_schemas = [t.schema for t in self._tools.values()] or None
         prefix = (
