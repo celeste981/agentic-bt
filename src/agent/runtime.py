@@ -28,7 +28,7 @@ class AgentConfig:
     tushare_token: str | None
     workspace_dir: Path
     state_dir: Path
-    enable_bash: bool = False
+    enable_bash: bool = True
     session_keep_last_user_messages: int = 20
     search_provider: str = "tavily"
     tavily_api_key: str | None = None
@@ -41,7 +41,7 @@ class AgentConfig:
         tushare_token = os.getenv("TUSHARE_TOKEN")
         workspace_dir = Path(os.getenv("WORKSPACE", "~/.agent/workspace")).expanduser()
         state_dir = Path(os.getenv("STATE_DIR", "~/.agent/state")).expanduser()
-        enable_bash = os.getenv("ENABLE_BASH", "").strip().lower() in ("1", "true", "yes", "y")
+        enable_bash = os.getenv("ENABLE_BASH", "1").strip().lower() not in ("0", "false", "no", "n")
         keep = int(os.getenv("SESSION_KEEP_LAST_USER_MESSAGES", "20"))
         search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
         tavily_api_key = os.getenv("TAVILY_API_KEY") or None
