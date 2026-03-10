@@ -1,7 +1,7 @@
 """
-[INPUT]: openai, json, pathlib, enum, agent.skills
+[INPUT]: openai, json, pathlib, enum, agent.skills, agent.subagents
 [OUTPUT]: Kernel — 核心协调器；Session — 会话容器（含 summary 摘要）；DataStore — 数据注册表；Permission — 文件权限级别；MemoryCompressor — 压缩策略接口；MEMORY_MAX_CHARS；WORKSPACE_GUIDE；skill_invoke
-[POS]: agent 包核心，系统唯一协调中心：ReAct loop + 声明式 wire/emit + DataStore + 权限 + 自举 + Skill Engine
+[POS]: agent 包核心，系统唯一协调中心：ReAct loop + 声明式 wire/emit + DataStore + 权限 + 自举 + Skill Engine + SubAgent System
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -26,6 +26,8 @@ from agent.skills import (
     invoke_skill,
     load_skills,
 )
+from agent.subagents import SubAgentSystem, load_subagents
+from core.subagent import SubAgentDef
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +183,7 @@ class Kernel:
         self._confirm_handler: Callable[[str], bool] | None = None
         self._skills: dict[str, Skill] = {}
         self._skill_diagnostics: list[dict[str, str]] = []
+        self._subagent_system: SubAgentSystem | None = None
 
     # ── 自举 ──────────────────────────────────────────────────────────────────
 
@@ -190,16 +193,18 @@ class Kernel:
         *,
         cwd: Path | None = None,
         skill_roots: list[Path] | None = None,
+        subagent_roots: list[Path] | None = None,
     ) -> None:
         """启动：soul + workspace 使用指南 → 系统提示词"""
         self._workspace = workspace
         workspace.mkdir(parents=True, exist_ok=True)
         self._load_skills(cwd=(cwd or Path.cwd()), skill_roots=skill_roots)
         self._register_skill_invoke_tool()
+        self._load_subagents(cwd=(cwd or Path.cwd()), subagent_roots=subagent_roots)
         self._assemble_system_prompt()
 
     def _assemble_system_prompt(self) -> None:
-        """soul.md + WORKSPACE_GUIDE → 系统提示词。Memory 内容不进入。"""
+        """soul.md + WORKSPACE_GUIDE + skills + team → 系统提示词"""
         soul = self._workspace / "soul.md"
         if soul.exists():
             identity = soul.read_text(encoding="utf-8")
@@ -210,6 +215,10 @@ class Kernel:
         skills_xml = build_available_skills_prompt(self._skills)
         if skills_xml and ("read" in self._tools or "skill_invoke" in self._tools):
             parts.append(skills_xml)
+        if self._subagent_system:
+            team_xml = self._subagent_system.team_prompt()
+            if team_xml:
+                parts.append(team_xml)
         self._system_prompt = "\n\n".join(parts)
 
     def _load_skills(self, cwd: Path, skill_roots: list[Path] | None) -> None:
@@ -315,6 +324,101 @@ class Kernel:
             },
             handler=skill_invoke_handler,
         )
+
+    # ── SubAgent 加载 ─────────────────────────────────────────────────────────
+
+    def _load_subagents(self, cwd: Path, subagent_roots: list[Path] | None) -> None:
+        roots: list[tuple[Path, str]]
+        if subagent_roots is not None:
+            roots = [(Path(p).expanduser(), "path") for p in subagent_roots]
+        else:
+            roots = self._default_subagent_roots(cwd.resolve())
+        definitions, diagnostics = load_subagents(roots)
+
+        if not roots:
+            return
+
+        # 初始化 SubAgentSystem
+        self._subagent_system = SubAgentSystem(
+            client=self.client,
+            model=self.model,
+            get_tool_schemas=lambda: [t.schema for t in self._tools.values()],
+            tool_executor=self._execute_tool,
+            emit_fn=self.emit,
+            max_subagents=10,
+        )
+
+        # 注册发现的定义
+        for defn in definitions.values():
+            self._subagent_system.register(defn)
+
+        # 注入工具
+        self._inject_subagent_tools()
+
+        self.emit("subagents.loaded", {
+            "count": len(definitions),
+            "roots": [str(p) for p, _ in roots],
+            "diagnostics": diagnostics,
+        })
+
+    def _default_subagent_roots(self, cwd: Path) -> list[tuple[Path, str]]:
+        roots: list[tuple[Path, str]] = []
+        for base in self._project_ancestors(cwd):
+            roots.append((base / ".agents" / "subagents", "project"))
+        user_roots = [
+            Path("~/.agents/subagents"),
+            Path("~/.agent/subagents"),
+        ]
+        roots.extend((p.expanduser(), "user") for p in user_roots)
+
+        # 保序去重
+        unique: list[tuple[Path, str]] = []
+        seen: set[Path] = set()
+        for path, source in roots:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append((resolved, source))
+        return unique
+
+    def _execute_tool(self, name: str, args: dict) -> Any:
+        """工具执行器——供 SubAgent 调用父级工具"""
+        tool_def = self._tools.get(name)
+        if tool_def is None:
+            return {"error": f"未知工具: {name}"}
+        try:
+            return tool_def.handler(args)
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def _inject_subagent_tools(self) -> None:
+        """将 SubAgentSystem 生成的工具注入 Kernel"""
+        if not self._subagent_system:
+            return
+        for name, tool_info in self._subagent_system.as_tool_defs().items():
+            self._tools[name] = ToolDef(
+                name=name,
+                schema=tool_info["schema"],
+                handler=tool_info["handler"],
+            )
+
+    def subagent(self, defn: SubAgentDef) -> dict[str, str] | None:
+        """API 入口：程序化注册 SubAgent。返回 None 成功，dict 失败"""
+        if self._subagent_system is None:
+            self._subagent_system = SubAgentSystem(
+                client=self.client,
+                model=self.model,
+                get_tool_schemas=lambda: [t.schema for t in self._tools.values()],
+                tool_executor=self._execute_tool,
+                emit_fn=self.emit,
+            )
+        err = self._subagent_system.register(defn)
+        if err:
+            return err
+        self._inject_subagent_tools()
+        self._assemble_system_prompt()
+        return None
 
     # ── 工具注册 ──────────────────────────────────────────────────────────────
 

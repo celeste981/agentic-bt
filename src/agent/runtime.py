@@ -1,7 +1,7 @@
 """
-[INPUT]: os, pathlib, agent.kernel, agent.tools, agent.adapters.market.{tushare,yfinance,finnhub,composite}, agent.adapters.web.tavily, agent.session_store
+[INPUT]: os, pathlib, agent.kernel, agent.tools, agent.adapters.market.{tushare,yfinance,finnhub,composite}, agent.adapters.web.tavily, agent.session_store, core.subagent
 [OUTPUT]: AgentConfig, KernelBundle, build_kernel_bundle
-[POS]: 入口无关的 Kernel 组装层：统一 tools/permission/wire/trace/session_store 路径约定
+[POS]: 入口无关的 Kernel 组装层：统一 tools/permission/wire/trace/session_store/subagent 路径约定
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -20,6 +20,7 @@ from agent.adapters.market.tushare import TushareAdapter
 from agent.adapters.market.yfinance import YFinanceAdapter
 from agent.adapters.market.composite import CompositeMarketAdapter, is_ashare
 from agent.tools import bash, compute, edit, market, read, web, write
+from core.subagent import SubAgentDef
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class AgentConfig:
     compact_recent_turns: int = 3
     search_provider: str = "tavily"
     tavily_api_key: str | None = None
+    subagents: list[SubAgentDef] | None = None
 
     @classmethod
     def from_env(cls) -> AgentConfig:
@@ -210,8 +212,13 @@ def build_kernel_bundle(
     kernel.permission("notebook/**", Permission.FREE)
     kernel.permission("__external__", Permission.USER_CONFIRM)
 
-    # boot (skills + system prompt)
+    # boot (skills + subagents + system prompt)
     kernel.boot(workspace)
+
+    # 程序化注册的 subagents
+    if config.subagents:
+        for defn in config.subagents:
+            kernel.subagent(defn)
 
     # wires: soul refresh + memory compress + trace
     compressor = LLMCompressor(kernel.client, kernel.model)

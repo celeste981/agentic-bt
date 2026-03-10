@@ -28,7 +28,7 @@ pyproject.toml - Python 包配置（venv: .venv/）
 docs/ - 完整设计文档集 (13 文件: agent-design, architecture, engine, tools, compute, memory, context, eval, agent-protocol, runner, tracer, roadmap, skills)
 src/core/ - 公共基础包 (4 文件: __init__, sandbox, indicators, tracer)
 src/agenticbt/ - 回测框架 (13 文件: __init__, models, engine, indicators, memory, tools, sandbox, context, agent, runner, eval, data, tracer)
-src/agent/ - 持久投资助手（Kernel + context_ops + runtime + session_store + tools + adapters: cli/telegram/im）
+src/agent/ - 持久投资助手（Kernel + context_ops + subagents + runtime + session_store + tools + adapters: cli/telegram/im）
 scripts/ - 分析脚本 (1 文件: analyze_trace)
 examples/ - 策略模块 (2 文件: __init__, strategies)
 tests/ - BDD 测试 + E2E（18 features + 19 test_*.py step definitions/e2e + conftest）
@@ -42,6 +42,7 @@ tests/ - BDD 测试 + E2E（18 features + 19 test_*.py step definitions/e2e + co
 | core/sandbox.py | exec_compute 沙箱执行器：eval-first/黑名单 builtins/Trading Coreutils/线程安全超时（主线程 SIGALRM + 非主线程 ThreadPoolExecutor）/自动降维 | docs/compute.md |
 | core/indicators.py | IndicatorEngine，pandas-ta 防前瞻包装，6 指标 | - |
 | core/tracer.py | TraceWriter 本地 JSONL 追踪，对齐 OTel GenAI | docs/tracer.md |
+| core/subagent.py | 领域无关 Sub-Agent 纯函数层：SubAgentDef/SubAgentResult + filter_schemas + run_subagent 通用 ReAct loop（资源管控） | - |
 | **agenticbt/** | | |
 | engine.py | 确定性市场模拟：多资产数据/market+limit+stop+bracket 订单/多空/风控4检查/百分比滑点/部分成交/risk_summary() 风控约束摘要 | docs/engine.md |
 | memory.py | 文件式记忆：Workspace 隔离 + log/note/recall | docs/memory.md |
@@ -215,7 +216,7 @@ def then_xxx(ctx, ...):
 
 ## 开发状态
 
-258 tests 全绿。agent 持久投资助手进入 Phase 2（runtime 统一组装 + SessionStore + IMDriver + Telegram polling 入口 + 会话上下文管理：auto-compact/overflow recovery/手动 compact/context 统计）。agenticbt 回测框架完成（确定性引擎 + 多资产 + bracket/limit/stop + 风控 + 11 工具）。美股数据接入完成（yfinance 默认 + Finnhub 后备 + Composite 多源路由 + MARKET_CN/MARKET_US 显式声明）。compute 沙箱线程安全（signal + ThreadPoolExecutor 双轨），market_ohlcv 返回原始 OHLCV（LLM 直接推理）。项目重心继续在 Phase 2（Discord/Webhook/流式输出/定时任务）。
+258 tests 全绿。agent 持久投资助手进入 Phase 2（runtime 统一组装 + SessionStore + IMDriver + Telegram polling 入口 + 会话上下文管理：auto-compact/overflow recovery/手动 compact/context 统计 + **Sub-Agent 子代理系统**：文件发现/SubAgentSystem/Agents-as-Tools/资源管控/team_prompt）。agenticbt 回测框架完成（确定性引擎 + 多资产 + bracket/limit/stop + 风控 + 11 工具）。美股数据接入完成（yfinance 默认 + Finnhub 后备 + Composite 多源路由 + MARKET_CN/MARKET_US 显式声明）。compute 沙箱线程安全（signal + ThreadPoolExecutor 双轨），market_ohlcv 返回原始 OHLCV（LLM 直接推理）。项目重心继续在 Phase 2（Discord/Webhook/流式输出/定时任务）。
 路线图：docs/roadmap.md
 
 # currentDate
