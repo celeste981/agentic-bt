@@ -1,5 +1,5 @@
 """
-[INPUT]: openai, json, pathlib, enum, agent.skills, agent.subagents
+[INPUT]: json, pathlib, enum, agent.skills, agent.subagents, agent.messages, agent.providers
 [OUTPUT]: Kernel — 核心协调器；Session — 会话容器（含 summary 摘要）；DataStore — 数据注册表；Permission — 文件权限级别；MemoryCompressor — 压缩策略接口；MEMORY_MAX_CHARS；WORKSPACE_GUIDE；skill_invoke
 [POS]: agent 包核心，系统唯一协调中心：ReAct loop + 声明式 wire/emit + DataStore + 权限 + 自举 + Skill Engine + SubAgent System
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -17,8 +17,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-import openai
-
+from agent.messages import TurnInput, build_user_message, ensure_turn_input, normalize_history, render_turn_input
+from agent.providers import LLMProvider, OpenAIChatProvider, message_to_dict
 from agent.skills import (
     Skill,
     build_available_skills_prompt,
@@ -93,7 +93,7 @@ class Session:
     def save(self, path: Path) -> None:
         """持久化到 JSON"""
         path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict = {"id": self.id, "history": self.history}
+        data: dict = {"version": 2, "id": self.id, "history": normalize_history(self.history)}
         if self.summary:
             data["summary"] = self.summary
         path.write_text(json.dumps(
@@ -105,7 +105,7 @@ class Session:
         """从 JSON 恢复（自动修复残缺历史，兼容旧格式无 summary）"""
         data = json.loads(path.read_text(encoding="utf-8"))
         session = cls(session_id=data["id"])
-        session.history = data["history"]
+        session.history = normalize_history(data["history"])
         session.summary = data.get("summary")
         session.repair()
         return session
@@ -162,6 +162,7 @@ class Kernel:
         model: str = "gpt-4o-mini",
         base_url: str | None = None,
         api_key: str | None = None,
+        provider: LLMProvider | None = None,
         max_rounds: int = 15,
         context_window: int = 100_000,
         compact_recent_turns: int = 3,
@@ -170,10 +171,11 @@ class Kernel:
         self.max_rounds = max_rounds
         self.context_window = context_window
         self.compact_recent_turns = compact_recent_turns
-        self.client = openai.OpenAI(
+        self.provider = provider or OpenAIChatProvider(
             base_url=base_url,
-            api_key=api_key or "dummy",
+            api_key=api_key,
         )
+        self.client = getattr(self.provider, "client", None)
         self.data = DataStore()
         self._tools: dict[str, ToolDef] = {}
         self._wires: defaultdict[str, list[Callable]] = defaultdict(list)
@@ -184,6 +186,16 @@ class Kernel:
         self._skills: dict[str, Skill] = {}
         self._skill_diagnostics: list[dict[str, str]] = []
         self._subagent_system: SubAgentSystem | None = None
+
+    @property
+    def client(self) -> Any | None:
+        return getattr(self, "_client", None)
+
+    @client.setter
+    def client(self, value: Any | None) -> None:
+        self._client = value
+        if hasattr(self, "provider") and hasattr(self.provider, "client"):
+            self.provider.client = value
 
     # ── 自举 ──────────────────────────────────────────────────────────────────
 
@@ -340,7 +352,7 @@ class Kernel:
 
         # 初始化 SubAgentSystem
         self._subagent_system = SubAgentSystem(
-            client=self.client,
+            provider=self.provider,
             model=self.model,
             get_tool_schemas=lambda: [t.schema for t in self._tools.values()],
             tool_executor=self._execute_tool,
@@ -407,7 +419,7 @@ class Kernel:
         """API 入口：程序化注册 SubAgent。返回 None 成功，dict 失败"""
         if self._subagent_system is None:
             self._subagent_system = SubAgentSystem(
-                client=self.client,
+                provider=self.provider,
                 model=self.model,
                 get_tool_schemas=lambda: [t.schema for t in self._tools.values()],
                 tool_executor=self._execute_tool,
@@ -478,29 +490,32 @@ class Kernel:
 
     # ── ReAct loop ────────────────────────────────────────────────────────────
 
-    def turn(self, user_input: str, session: Session) -> str:
+    def turn(self, user_input: str | TurnInput, session: Session) -> str:
         """核心：接收用户输入 → ReAct loop → 返回回复"""
         today = datetime.now().strftime("%Y-%m-%d")
-        self.emit("turn.start", {"input": user_input})
+        turn_input = ensure_turn_input(user_input)
+        self.emit("turn.start", {"input": render_turn_input(turn_input)})
         expanded, expand_error, skill_name = expand_explicit_skill_command(
-            user_input=user_input,
+            user_input=turn_input.text,
             skills=self._skills,
         )
-        final_user_input = expanded or user_input
-        dated_input = f"[{today}]\n{final_user_input}"
-        session.history.append({"role": "user", "content": dated_input})
+        final_turn_input = TurnInput(
+            text=expanded or turn_input.text,
+            attachments=turn_input.attachments,
+        )
+        session.history.append(build_user_message(final_turn_input, date_str=today))
 
         if expand_error:
             session.history.append({"role": "assistant", "content": expand_error})
             self.emit(
                 "skill.expand.error",
-                {"input": user_input, "skill": skill_name, "error": expand_error},
+                {"input": turn_input.text, "skill": skill_name, "error": expand_error},
             )
-            self.emit("turn.done", {"input": user_input, "reply": expand_error})
+            self.emit("turn.done", {"input": render_turn_input(turn_input), "reply": expand_error})
             return expand_error
 
         if expanded:
-            self.emit("skill.expanded", {"input": user_input, "skill": skill_name})
+            self.emit("skill.expanded", {"input": turn_input.text, "skill": skill_name})
 
         tool_schemas = [t.schema for t in self._tools.values()] or None
 
@@ -523,7 +538,7 @@ class Kernel:
         est = estimate_tokens(prefix + session.history)
         if est > int(self.context_window * 0.75):
             result = compact_history(
-                client=self.client, model=self.model,
+                provider=self.provider, model=self.model,
                 history=session.history, recent_turns=self.compact_recent_turns,
             )
             session.history = result.retained
@@ -564,12 +579,14 @@ class Kernel:
                 "model": self.model,
                 "messages": prefix + session.history,
             }
-            if tool_schemas:
-                kwargs["tools"] = tool_schemas
 
             self.emit("llm.call.start", {"round": round_num})
             try:
-                response = self.client.chat.completions.create(**kwargs)
+                response = self.provider.complete(
+                    model=kwargs["model"],
+                    messages=kwargs["messages"],
+                    tools=tool_schemas,
+                )
             except Exception as exc:
                 self.emit("llm.call.error", {
                     "round": round_num,
@@ -577,30 +594,28 @@ class Kernel:
                     "error": str(exc),
                 })
                 raise
-            choice = response.choices[0]
-            tokens = getattr(getattr(response, "usage", None), "total_tokens", 0) or 0
             self.emit(
                 "llm.call.done",
                 {
                     "round": round_num,
-                    "finish_reason": choice.finish_reason,
-                    "total_tokens": tokens,
+                    "finish_reason": response.finish_reason,
+                    "total_tokens": response.usage_total_tokens,
                 },
             )
 
             # 存储 assistant 消息
-            session.history.append(_msg_to_dict(choice.message))
+            session.history.append(response.assistant_message)
 
-            if choice.finish_reason == "stop":
-                reply = choice.message.content or ""
+            if response.finish_reason == "stop":
+                reply = str(response.assistant_message.get("content") or "")
                 break
 
             # 上下文溢出 → 压缩后重试
-            if choice.finish_reason == "length":
+            if response.finish_reason == "length":
                 # 撤销刚添加的截断消息
                 session.history.pop()
                 result = compact_history(
-                    client=self.client, model=self.model,
+                    provider=self.provider, model=self.model,
                     history=session.history, recent_turns=self.compact_recent_turns,
                 )
                 session.history = result.retained
@@ -629,30 +644,30 @@ class Kernel:
                 continue
 
             # 工具调用
-            if choice.message.tool_calls:
-                for tc in choice.message.tool_calls:
+            if response.tool_calls:
+                for tc in response.tool_calls:
                     try:
-                        args = json.loads(tc.function.arguments)
+                        args = json.loads(tc.arguments)
                     except json.JSONDecodeError:
                         args = {}
                     self.emit(
                         "tool.call.start",
-                        {"name": tc.function.name, "args": args},
+                        {"name": tc.name, "args": args},
                     )
-                    tool_def = self._tools.get(tc.function.name)
+                    tool_def = self._tools.get(tc.name)
                     if tool_def:
                         try:
                             result = tool_def.handler(args)
                         except Exception as exc:
                             result = {"error": f"{type(exc).__name__}: {exc}"}
-                        self.emit(f"tool:{tc.function.name}", {
+                        self.emit(f"tool:{tc.name}", {
                             "args": args, "result": result,
                         })
                     else:
-                        result = {"error": f"未知工具: {tc.function.name}"}
+                        result = {"error": f"未知工具: {tc.name}"}
                     self.emit(
                         "tool.call.done",
-                        {"name": tc.function.name, "result": result},
+                        {"name": tc.name, "result": result},
                     )
 
                     session.history.append({
@@ -665,7 +680,7 @@ class Kernel:
             reply = f"[max_rounds={self.max_rounds} 耗尽]"
             session.history.append({"role": "assistant", "content": reply})
 
-        self.emit("turn.done", {"input": user_input, "reply": reply})
+        self.emit("turn.done", {"input": render_turn_input(turn_input), "reply": reply})
         return reply
 
 
@@ -674,24 +689,5 @@ class Kernel:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _msg_to_dict(msg: Any) -> dict:
-    """OpenAI message 对象 → dict"""
-    d: dict[str, Any] = {"role": msg.role, "content": msg.content}
-    reasoning_content = getattr(msg, "reasoning_content", None)
-    model_extra = getattr(msg, "model_extra", None)
-    if reasoning_content is None and isinstance(model_extra, dict):
-        reasoning_content = model_extra.get("reasoning_content")
-    if reasoning_content is not None:
-        d["reasoning_content"] = reasoning_content
-    if msg.tool_calls:
-        d["tool_calls"] = [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                },
-            }
-            for tc in msg.tool_calls
-        ]
-    return d
+    """兼容测试：provider 层统一的 message 归一化函数。"""
+    return message_to_dict(msg)

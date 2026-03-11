@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
 
+from agent.providers import OpenAIChatProvider
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 数据类型
@@ -96,7 +98,8 @@ def run_subagent(
     definition: SubAgentDef,
     task: str,
     context: str = "",
-    client: Any,
+    provider: Any | None = None,
+    client: Any | None = None,
     model: str,
     tool_schemas: list[dict],
     tool_executor: Callable[[str, dict], Any],
@@ -111,6 +114,7 @@ def run_subagent(
     3. token_budget / timeout / max_rounds 资源管控
     """
     defn = definition
+    use_provider = provider or OpenAIChatProvider(client=client)
     use_model = defn.model or model
     system = _build_system_prompt(defn)
 
@@ -174,7 +178,7 @@ def run_subagent(
 
         # LLM 调用（3 次指数退避）
         llm_response = _call_llm(
-            client=client,
+            provider=use_provider,
             model=use_model,
             messages=messages,
             tools=schemas or None,
@@ -197,41 +201,40 @@ def run_subagent(
             response_text = "[error] LLM 调用失败"
             break
 
-        choice = llm_response.choices[0]
-        round_tokens = getattr(getattr(llm_response, "usage", None), "total_tokens", 0) or 0
-        total_tokens += round_tokens
+        total_tokens += llm_response.usage_total_tokens
 
         if emit_fn:
             emit_fn("subagent.llm.call.done", {
                 "name": defn.name,
                 "run_id": run_id,
                 "round": round_num,
-                "finish_reason": choice.finish_reason,
-                "total_tokens": round_tokens,
+                "finish_reason": llm_response.finish_reason,
+                "total_tokens": llm_response.usage_total_tokens,
             })
 
         # 捕获推理文本
-        if choice.message.content:
-            last_reasoning = choice.message.content
+        content = llm_response.assistant_message.get("content")
+        if content:
+            last_reasoning = str(content)
 
-        messages.append(_msg_to_dict(choice.message))
+        messages.append(dict(llm_response.assistant_message))
 
         # token 预算检查（优先于 finish_reason，确保元数据准确）
         if total_tokens >= defn.token_budget:
             budget_exhausted = True
-            response_text = last_reasoning or choice.message.content or "[budget_exhausted]"
+            response_text = last_reasoning or str(content or "") or "[budget_exhausted]"
             break
 
         # 正常结束
-        if choice.finish_reason == "stop":
-            response_text = choice.message.content or ""
+        if llm_response.finish_reason == "stop":
+            response_text = str(content or "")
             break
 
         # 工具调用
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
+        if llm_response.tool_calls:
+            for tc in llm_response.tool_calls:
                 try:
-                    args = json.loads(tc.function.arguments)
+                    args = json.loads(tc.arguments)
                 except json.JSONDecodeError:
                     args = {}
 
@@ -240,12 +243,12 @@ def run_subagent(
                         "name": defn.name,
                         "run_id": run_id,
                         "round": round_num,
-                        "tool": tc.function.name,
+                        "tool": tc.name,
                         "args": args,
                     })
-                tool_result = tool_executor(tc.function.name, args)
+                tool_result = tool_executor(tc.name, args)
                 all_tool_calls.append({
-                    "tool": tc.function.name,
+                    "tool": tc.name,
                     "args": args,
                     "result": tool_result,
                 })
@@ -255,14 +258,14 @@ def run_subagent(
                         "name": defn.name,
                         "run_id": run_id,
                         "round": round_num,
-                        "tool": tc.function.name,
+                        "tool": tc.name,
                         "result": tool_result,
                     })
                     emit_fn("subagent.tool", {
                         "name": defn.name,
                         "run_id": run_id,
                         "round": round_num,
-                        "tool": tc.function.name,
+                        "tool": tc.name,
                     })
 
                 messages.append({
@@ -312,7 +315,7 @@ def run_subagent(
 
 def _call_llm(
     *,
-    client: Any,
+    provider: Any,
     model: str,
     messages: list,
     tools: list | None,
@@ -323,17 +326,14 @@ def _call_llm(
     round_num: int | None = None,
 ) -> Any | None:
     """带 3 次指数退避的 LLM 调用"""
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if tools:
-        kwargs["tools"] = tools
-
     for attempt in range(3):
         try:
-            return client.chat.completions.create(**kwargs)
+            return provider.complete(
+                model=model,
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+            )
         except Exception as exc:
             if emit_fn and agent_name and run_id and round_num is not None:
                 emit_fn("subagent.llm.call.error", {
@@ -351,7 +351,7 @@ def _call_llm(
 
 
 def _msg_to_dict(msg: Any) -> dict:
-    """OpenAI message 对象 → dict"""
+    """兼容测试：OpenAI message 对象 → dict。"""
     d: dict[str, Any] = {"role": msg.role, "content": msg.content}
     reasoning_content = getattr(msg, "reasoning_content", None)
     model_extra = getattr(msg, "model_extra", None)

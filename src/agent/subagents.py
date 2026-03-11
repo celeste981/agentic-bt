@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
 from core.subagent import SubAgentDef, SubAgentResult, filter_schemas, run_subagent
+from agent.providers import OpenAIChatProvider
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,14 +165,15 @@ class SubAgentSystem:
     def __init__(
         self,
         *,
-        client: Any,
+        provider: Any | None = None,
+        client: Any | None = None,
         model: str,
         get_tool_schemas: Callable[[], list[dict]],
         tool_executor: Callable[[str, dict], Any],
         emit_fn: Callable[[str, Any], None] | None = None,
         max_subagents: int = 10,
     ) -> None:
-        self._client = client
+        self._provider = provider or OpenAIChatProvider(client=client)
         self._model = model
         self._get_tool_schemas = get_tool_schemas
         self._tool_executor = tool_executor
@@ -214,7 +216,7 @@ class SubAgentSystem:
             definition=defn,
             task=task,
             context=context,
-            client=self._client,
+            provider=self._provider,
             model=self._model,
             tool_schemas=self._get_tool_schemas(),
             tool_executor=self._tool_executor,

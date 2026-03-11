@@ -1,5 +1,5 @@
 """
-[INPUT]: os, pathlib, agent.kernel, agent.tools, agent.adapters.market.{tushare,yfinance,finnhub,composite}, agent.adapters.web.tavily, agent.session_store, core.subagent
+[INPUT]: os, pathlib, agent.kernel, agent.tools, agent.adapters.market.{tushare,yfinance,finnhub,composite}, agent.adapters.web.tavily, agent.session_store, agent.providers, core.subagent
 [OUTPUT]: AgentConfig, KernelBundle, build_kernel_bundle
 [POS]: 入口无关的 Kernel 组装层：统一 tools/permission/wire/trace/session_store/subagent 路径约定
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from agent.kernel import Kernel, MEMORY_MAX_CHARS, Permission
+from agent.providers import LLMProvider, OpenAIChatProvider
 from agent.session_store import JsonSessionStore, SessionStore
 from agent.adapters.market.tushare import TushareAdapter
 from agent.adapters.market.yfinance import YFinanceAdapter
@@ -39,6 +40,7 @@ class AgentConfig:
     compact_recent_turns: int = 3
     search_provider: str = "tavily"
     tavily_api_key: str | None = None
+    image_detail: str = "low"
     subagents: list[SubAgentDef] | None = None
 
     @classmethod
@@ -57,6 +59,7 @@ class AgentConfig:
         compact_recent_turns = int(os.getenv("COMPACT_RECENT_TURNS", "3"))
         search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
         tavily_api_key = os.getenv("TAVILY_API_KEY") or None
+        image_detail = (os.getenv("IMAGE_DETAIL") or "low").strip().lower() or "low"
         return cls(
             model=model,
             base_url=base_url,
@@ -72,6 +75,7 @@ class AgentConfig:
             compact_recent_turns=compact_recent_turns,
             search_provider=search_provider,
             tavily_api_key=tavily_api_key,
+            image_detail=image_detail,
         )
 
 
@@ -88,12 +92,12 @@ class KernelBundle:
 class LLMCompressor:
     """用 LLM 做记忆整合（与 CLI 逻辑一致）。"""
 
-    def __init__(self, client: object, model: str) -> None:
-        self.client = client
+    def __init__(self, provider: LLMProvider, model: str) -> None:
+        self.provider = provider
         self.model = model
 
     def compress(self, content: str, limit: int) -> str:
-        response = self.client.chat.completions.create(
+        response = self.provider.complete(
             model=self.model,
             messages=[
                 {"role": "system", "content": (
@@ -104,7 +108,7 @@ class LLMCompressor:
                 {"role": "user", "content": content},
             ],
         )
-        return response.choices[0].message.content or content[:limit]
+        return str(response.assistant_message.get("content") or content[:limit])
 
 
 def _wire_trace(kernel: Kernel, trace_path: Path) -> None:
@@ -178,8 +182,14 @@ def build_kernel_bundle(
     workspace.mkdir(parents=True, exist_ok=True)
     state.mkdir(parents=True, exist_ok=True)
 
+    provider = OpenAIChatProvider(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        image_detail=config.image_detail,
+    )
     kernel = Kernel(
-        model=config.model, base_url=config.base_url, api_key=config.api_key,
+        model=config.model,
+        provider=provider,
         context_window=config.context_window, compact_recent_turns=config.compact_recent_turns,
     )
 
@@ -222,7 +232,7 @@ def build_kernel_bundle(
             kernel.subagent(defn)
 
     # wires: soul refresh + memory compress + trace
-    compressor = LLMCompressor(kernel.client, kernel.model)
+    compressor = LLMCompressor(kernel.provider, kernel.model)
     kernel.wire("write:soul.md", lambda e, d: kernel._assemble_system_prompt())
     kernel.wire("edit:soul.md", lambda e, d: kernel._assemble_system_prompt())
     kernel.wire("write:memory.md", lambda e, d: _on_memory_write(kernel, workspace, compressor))
